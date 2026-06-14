@@ -1,0 +1,37 @@
+`include "constants.h"
+`include "discipline.h"
+
+module temp_ctrl ();
+
+    parameter real temp_start = 27;    // starting temperature (deg C)
+    parameter real temp_end   = 150;   // final temperature (deg C)
+    parameter real temp_step  = 10;    // ramp step (deg C); set = full delta for single jump
+    parameter real delay      = 1m;    // hold at temp_start before ramping
+    parameter real Tstep      = 1m;    // time between temperature steps (settle)
+
+    real temp_cur;
+
+    (* desc="commanded temperature", units="C" *) real temp_dbg;
+
+    analog begin
+        @(initial_step) begin
+            temp_cur = temp_start;
+            temp_dbg = temp_cur;
+            $cds_set_temperature(temp_cur);
+        end
+
+        @(timer(delay, Tstep)) begin
+            if (abs(temp_cur - temp_end) > temp_step) begin
+                if (temp_end > temp_cur)
+                    temp_cur = temp_cur + temp_step;
+                else
+                    temp_cur = temp_cur - temp_step;
+            end else begin
+                temp_cur = temp_end;   // snap to final
+            end
+            $cds_set_temperature(temp_cur);
+            temp_dbg = temp_cur;
+        end
+    end
+
+endmodule
