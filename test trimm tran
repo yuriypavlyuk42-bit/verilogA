@@ -9,7 +9,7 @@ module trimm_cal (vout, bg_in, vbg_ok);
     parameter integer cal_en         = 1;     // 1 = full trim sequence (TRAN), 0 = bypass, hold code_init (DC)
     parameter real    vddc           = 1.2;
     parameter real    target         = 1.22;  // target bandgap value
-    parameter real    vbg_ok_th      = 1.0;   // vbg_ok threshold (capture + window-edge detect)
+    parameter real    vbg_ok_th      = 1.0;   // vbg_ok threshold (window-edge detect)
     parameter real    Tclk           = 1m;    // settle time per step
     parameter real    start_delay    = 1m;    // initial delay before action
     parameter real    post_cal_delay = 5m;    // hold best_code at temp_cal before ramping down
@@ -42,7 +42,6 @@ module trimm_cal (vout, bg_in, vbg_ok);
     integer post_cnt;
     integer ramp_cnt;
     integer ramp_ticks;
-    integer ok_latched;
     integer ov_latched;
     integer uv_latched;
     integer pulling;        // 1 while servo drives the node
@@ -69,7 +68,6 @@ module trimm_cal (vout, bg_in, vbg_ok);
     (* desc="best abs error", units="V" *)    real    best_err;
     (* desc="measured bandgap", units="V" *)  real    v_meas;
     (* desc="final bandgap at temp_test", units="V" *) real v_final;
-    (* desc="bg_in captured at vbg_ok rising", units="V" *) real vbg_at_ok;
     (* desc="overvoltage trip (vbg_ok falls, rising bg_in)", units="V" *)  real v_ov;
     (* desc="undervoltage trip (vbg_ok falls, falling bg_in)", units="V" *) real v_uv;
     (* desc="commanded pull target", units="V" *) real v_tgt_dbg;
@@ -82,14 +80,12 @@ module trimm_cal (vout, bg_in, vbg_ok);
             step       = 0;
             post_cnt   = 0;
             ramp_cnt   = 0;
-            ok_latched = 0;
             ov_latched = 0;
             uv_latched = 0;
             pulling    = 0;
             best_err   = inf;
             v_meas     = 0;
             v_final    = 0;
-            vbg_at_ok  = 0;
             v_ov       = 0;
             v_uv       = 0;
             v_tgt      = 0;
@@ -104,14 +100,6 @@ module trimm_cal (vout, bg_in, vbg_ok);
 
             if (cal_en)
                 $cds_set_temperature(temp_cur);
-        end
-
-        // capture bg_in the first time vbg_ok rises past threshold, only during INIT_HOLD
-        @(cross(V(vbg_ok) - vbg_ok_th, +1)) begin
-            if (cal_en && !ok_latched && state == INIT_HOLD) begin
-                vbg_at_ok  = V(bg_in);
-                ok_latched = 1;
-            end
         end
 
         // window-edge detection: catch vbg_ok FALLING past threshold during pull
@@ -270,13 +258,13 @@ module trimm_cal (vout, bg_in, vbg_ok);
         // inject current proportional to error; high Gpull overrides the source so the node
         // actually reaches pull_hi / pull_lo regardless of supply stiffness.
         if (cal_en && pulling)
-            I(bg_in) <+ Gpull * (V(bg_in) - v_tgt);   // current sinks/sources to drive node to v_tgt
+            I(bg_in) <+ Gpull * (V(bg_in) - v_tgt);
         else
-            I(bg_in) <+ V(bg_in) / Rrelax;            // effectively open when released
+            I(bg_in) <+ V(bg_in) / Rrelax;
 
         @(final_step)
-            $strobe("CAL_RESULT best_code=%d norm_code=%d best_err=%g v_final=%g vbg_at_ok=%g v_ov=%g v_uv=%g temp_test=%g",
-                    best_code, norm_code, best_err, v_final, vbg_at_ok, v_ov, v_uv, temp_test);
+            $strobe("CAL_RESULT best_code=%d norm_code=%d best_err=%g v_final=%g v_ov=%g v_uv=%g temp_test=%g",
+                    best_code, norm_code, best_err, v_final, v_ov, v_uv, temp_test);
     end
 
 endmodule
