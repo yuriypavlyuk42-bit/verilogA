@@ -19,11 +19,12 @@ module trimm_cal (vout, bg_in, vbg_ok);
     // ----- pull-phase parameters -----
     parameter real    pull_hi        = 1.4;   // upper target (overvoltage probe)
     parameter real    pull_lo        = 1.0;   // lower target (undervoltage probe)
-    parameter real    R_pull         = 10k;   // finite series impedance for pulling (tune to source stiffness)
-    parameter real    t_up           = 5m;    // time to ramp from start -> pull_hi
-    parameter real    t_down         = 10m;   // time to ramp from pull_hi -> pull_lo
-    parameter real    t_ret          = 5m;    // time to ramp from pull_lo -> start (return)
-    parameter real    pull_settle    = 5m;    // hold after DONE before pulling begins
+    parameter real    t_up           = 5m;    // time: start -> pull_hi
+    parameter real    t_down         = 10m;   // time: pull_hi -> pull_lo
+    parameter real    t_ret          = 5m;    // time: pull_lo -> start (return)
+    parameter real    pull_settle    = 5m;    // hold after DONE before pulling
+    parameter real    Gpull          = 1.0;   // servo transconductance (A/V); high = node follows target stiffly
+    parameter real    Rrelax         = 1e9;   // huge resistance when released (effectively open)
 
     output [3:0] vout;
     electrical [3:0] vout;
@@ -44,12 +45,12 @@ module trimm_cal (vout, bg_in, vbg_ok);
     integer ok_latched;
     integer ov_latched;
     integer uv_latched;
-    integer pulling;        // 1 while we drive the node (pull current active)
+    integer pulling;        // 1 while servo drives the node
     real    temp_cur;
-    real    v_pull;         // commanded pull voltage (drives bg_in through R_pull)
+    real    v_tgt;          // target voltage the node should follow during pull
     real    v_start;        // bg_in value captured at pull-phase start (pre-pull)
-    real    ph_t0;          // time at which current pull sub-phase began
-    real    ph_v0;          // v_pull at which current pull sub-phase began
+    real    ph_t0;          // time current pull sub-phase began
+    real    ph_v0;          // v_tgt at start of current pull sub-phase
 
     // FSM states:
     localparam INIT_HOLD  = 0;
@@ -58,10 +59,10 @@ module trimm_cal (vout, bg_in, vbg_ok);
     localparam POST_DELAY = 3;
     localparam RAMP_DOWN  = 4;
     localparam DONE       = 5;
-    localparam PULL_UP    = 6;   // ramp v_pull: v_start -> pull_hi over t_up
-    localparam PULL_DOWN  = 7;   // ramp v_pull: pull_hi -> pull_lo over t_down
-    localparam PULL_RET   = 8;   // ramp v_pull: pull_lo -> v_start over t_ret
-    localparam PULL_DONE  = 9;   // release node
+    localparam PULL_UP    = 6;
+    localparam PULL_DOWN  = 7;
+    localparam PULL_RET   = 8;
+    localparam PULL_DONE  = 9;
 
     (* desc="best trim code" *)               integer best_code;
     (* desc="monotonic normalized code" *)    integer norm_code;
@@ -71,6 +72,7 @@ module trimm_cal (vout, bg_in, vbg_ok);
     (* desc="bg_in captured at vbg_ok rising", units="V" *) real vbg_at_ok;
     (* desc="overvoltage trip (vbg_ok falls, rising bg_in)", units="V" *)  real v_ov;
     (* desc="undervoltage trip (vbg_ok falls, falling bg_in)", units="V" *) real v_uv;
+    (* desc="commanded pull target", units="V" *) real v_tgt_dbg;
 
     analog begin
         @(initial_step) begin
@@ -90,10 +92,11 @@ module trimm_cal (vout, bg_in, vbg_ok);
             vbg_at_ok  = 0;
             v_ov       = 0;
             v_uv       = 0;
-            v_pull     = 0;
+            v_tgt      = 0;
             v_start    = 0;
             ph_t0      = 0;
             ph_v0      = 0;
+            v_tgt_dbg  = 0;
             temp_cur   = temp_test;
             state      = INIT_HOLD;
 
@@ -199,21 +202,21 @@ module trimm_cal (vout, bg_in, vbg_ok);
                     end
 
                     DONE: begin
-                        v_final = V(bg_in);           // bandgap at temp_test, trimmed, before pulling
+                        v_final = V(bg_in);
                         post_cnt = post_cnt + 1;
                         if (post_cnt * Tclk >= pull_settle) begin
-                            v_start  = V(bg_in);      // remember pre-pull node voltage
-                            v_pull   = v_start;
-                            ph_t0    = $abstime;      // start time of PULL_UP
-                            ph_v0    = v_start;
-                            pulling  = 1;
-                            state    = PULL_UP;
+                            v_start = V(bg_in);       // pre-pull node voltage
+                            v_tgt   = v_start;
+                            ph_t0   = $abstime;
+                            ph_v0   = v_start;
+                            pulling = 1;
+                            state   = PULL_UP;
                         end
                     end
 
                     PULL_UP: begin
                         if ($abstime - ph_t0 >= t_up) begin
-                            ph_t0 = $abstime;         // start PULL_DOWN
+                            ph_t0 = $abstime;
                             ph_v0 = pull_hi;
                             state = PULL_DOWN;
                         end
@@ -221,7 +224,7 @@ module trimm_cal (vout, bg_in, vbg_ok);
 
                     PULL_DOWN: begin
                         if ($abstime - ph_t0 >= t_down) begin
-                            ph_t0 = $abstime;         // start PULL_RET
+                            ph_t0 = $abstime;
                             ph_v0 = pull_lo;
                             state = PULL_RET;
                         end
@@ -229,26 +232,28 @@ module trimm_cal (vout, bg_in, vbg_ok);
 
                     PULL_RET: begin
                         if ($abstime - ph_t0 >= t_ret) begin
-                            pulling = 0;              // release the node
+                            pulling = 0;
                             state   = PULL_DONE;
                         end
                     end
 
                     PULL_DONE: begin
-                        // node released, nothing more
+                        // released
                     end
 
                 endcase
             end
         end
 
-        // ===== time-based linear ramp of v_pull within each pull sub-phase =====
+        // ===== time-based target trajectory (continuous) =====
         if (state == PULL_UP)
-            v_pull = ph_v0 + (pull_hi - ph_v0) * ((($abstime - ph_t0) > t_up ? t_up : ($abstime - ph_t0)) / t_up);
+            v_tgt = ph_v0 + (pull_hi - ph_v0) * ((($abstime - ph_t0) > t_up   ? t_up   : ($abstime - ph_t0)) / t_up);
         else if (state == PULL_DOWN)
-            v_pull = ph_v0 + (pull_lo - ph_v0) * ((($abstime - ph_t0) > t_down ? t_down : ($abstime - ph_t0)) / t_down);
+            v_tgt = ph_v0 + (pull_lo - ph_v0) * ((($abstime - ph_t0) > t_down ? t_down : ($abstime - ph_t0)) / t_down);
         else if (state == PULL_RET)
-            v_pull = ph_v0 + (v_start - ph_v0) * ((($abstime - ph_t0) > t_ret ? t_ret : ($abstime - ph_t0)) / t_ret);
+            v_tgt = ph_v0 + (v_start - ph_v0) * ((($abstime - ph_t0) > t_ret  ? t_ret  : ($abstime - ph_t0)) / t_ret);
+
+        v_tgt_dbg = v_tgt;
 
         // ===== output code selection =====
         if (cal_en)
@@ -261,9 +266,13 @@ module trimm_cal (vout, bg_in, vbg_ok);
         V(vout[2]) <+ transition(((out_code >> 2) & 1) * vddc, 0, tt);
         V(vout[3]) <+ transition(((out_code >> 3) & 1) * vddc, 0, tt);
 
-        // ===== finite-impedance pull into bg_in (active only while pulling) =====
+        // ===== servo pull: force V(bg_in) to follow v_tgt =====
+        // inject current proportional to error; high Gpull overrides the source so the node
+        // actually reaches pull_hi / pull_lo regardless of supply stiffness.
         if (cal_en && pulling)
-            I(bg_in) <+ (V(bg_in) - v_pull) / R_pull;
+            I(bg_in) <+ Gpull * (V(bg_in) - v_tgt);   // current sinks/sources to drive node to v_tgt
+        else
+            I(bg_in) <+ V(bg_in) / Rrelax;            // effectively open when released
 
         @(final_step)
             $strobe("CAL_RESULT best_code=%d norm_code=%d best_err=%g v_final=%g vbg_at_ok=%g v_ov=%g v_uv=%g temp_test=%g",
