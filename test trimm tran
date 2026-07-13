@@ -37,18 +37,19 @@ module trimm_cal (vout, test_mode, bg_in);
     real    temp_cur;
 
     // FSM states:
-    localparam INIT_HOLD  = 0;
+    localparam INIT_HOLD  = 0;   // initial delay at temp_test
     localparam RAMP_UP    = 1;   // ramp temp_test -> temp_cal
     localparam CALIBRATE  = 2;   // sweep codes at temp_cal, find best
     localparam POST_DELAY = 3;   // hold best_code at temp_cal
     localparam RAMP_DOWN  = 4;   // ramp temp_cal -> temp_test
     localparam DONE       = 5;   // hold best_code at temp_test, settle
     localparam TEST_ENTER = 6;   // set code 0, assert test_mode
-    localparam TEST_HOLD0 = 7;   // hold code 0 for one frame before stepping
-    localparam TEST_UP    = 8;   // walk 0 -> 7   (lower half, voltage rising)
+    localparam TEST_HOLD0 = 7;   // hold code 0 one frame before stepping
+    localparam TEST_UP    = 8;   // walk 0 -> 7   (voltage rising)
     localparam TEST_JUMP  = 9;   // jump to 15, hold one frame
-    localparam TEST_DN    = 10;  // walk 15 -> 8  (upper half, voltage falling)
-    localparam TEST_EXIT  = 11;  // deassert test mode, restore best_code
+    localparam TEST_DN    = 10;  // walk 15 -> 8  (voltage falling)
+    localparam TEST_ZERO  = 11;  // return code to 0000, still in test mode
+    localparam TEST_EXIT  = 12;  // deassert test mode, restore best_code
 
     (* desc="best trim code" *)               integer best_code;
     (* desc="monotonic normalized code" *)    integer norm_code;
@@ -165,12 +166,12 @@ module trimm_cal (vout, test_mode, bg_in);
                     end
 
                     TEST_HOLD0: begin
-                        // hold code 0 for one frame so it settles before stepping up
+                        // hold code 0 one frame so it settles before stepping
                         state = TEST_UP;
                     end
 
                     TEST_UP: begin
-                        // lower half, voltage rising: 0 -> 7
+                        // voltage rising: 0 -> 7
                         if (tstep < 7) begin
                             tstep    = tstep + 1;
                             trim_val = tstep;
@@ -180,20 +181,26 @@ module trimm_cal (vout, test_mode, bg_in);
                     end
 
                     TEST_JUMP: begin
-                        // jump straight to top of the other branch, hold one frame
+                        // jump to the other branch top, hold one frame
                         tstep    = 15;
                         trim_val = 15;
                         state    = TEST_DN;
                     end
 
                     TEST_DN: begin
-                        // upper half, voltage falling: 15 -> 8
+                        // voltage falling: 15 -> 8
                         if (tstep > 8) begin
                             tstep    = tstep - 1;
                             trim_val = tstep;
                         end else begin
-                            state = TEST_EXIT;
+                            state = TEST_ZERO;
                         end
+                    end
+
+                    TEST_ZERO: begin
+                        // back to 0000 while still in test mode, hold one frame
+                        trim_val = 0;
+                        state    = TEST_EXIT;
                     end
 
                     TEST_EXIT: begin
