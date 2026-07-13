@@ -44,9 +44,8 @@ module trimm_cal (vout, test_mode, bg_in);
     localparam RAMP_DOWN  = 4;   // ramp temp_cal -> temp_test
     localparam DONE       = 5;   // hold best_code at temp_test, settle
     localparam TEST_ENTER = 6;   // set code 0, assert test_mode
-    localparam TEST_UP    = 7;   // sweep codes 0 -> 15 in test mode
-    localparam TEST_DOWN  = 8;   // sweep codes 15 -> 0 in test mode
-    localparam TEST_EXIT  = 9;   // deassert test mode, restore best_code
+    localparam TEST_UP    = 7;   // sweep codes 0 -> 15 in test mode (single pass)
+    localparam TEST_EXIT  = 8;   // deassert test mode, restore best_code
 
     (* desc="best trim code" *)               integer best_code;
     (* desc="monotonic normalized code" *)    integer norm_code;
@@ -163,19 +162,9 @@ module trimm_cal (vout, test_mode, bg_in);
                     end
 
                     TEST_UP: begin
-                        // walk codes up: 0 -> 15, one code per tick
+                        // single pass: walk codes 0 -> 15, one code per tick
                         if (tstep < 15) begin
                             tstep    = tstep + 1;
-                            trim_val = tstep;
-                        end else begin
-                            state = TEST_DOWN;
-                        end
-                    end
-
-                    TEST_DOWN: begin
-                        // walk codes back down: 15 -> 0, one code per tick
-                        if (tstep > 0) begin
-                            tstep    = tstep - 1;
                             trim_val = tstep;
                         end else begin
                             state = TEST_EXIT;
