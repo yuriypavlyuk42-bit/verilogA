@@ -11,7 +11,8 @@ module trimm_cal (vout, test_mode, bg_in);
     parameter real    target         = 1.22;  // target bandgap value
     parameter real    Tclk           = 1m;    // settle time per step
     parameter real    start_delay    = 1m;    // initial delay before action
-    parameter real    post_cal_delay = 5m;    // hold best_code at temp_cal before window test
+    parameter real    post_cal_delay = 5m;    // hold best_code at temp_cal before ramping down
+    parameter real    test_settle    = 5m;    // hold at temp_test before window test
     parameter real    tt             = 1u;    // bit transition time
     parameter integer code_init      = 0 from [0:15];
 
@@ -35,20 +36,20 @@ module trimm_cal (vout, test_mode, bg_in);
     integer ramp_ticks;
     real    temp_cur;
 
-    // FSM states (order: trim @150 -> window test @150 -> cool down to temp_test):
+    // FSM states (trim @150 -> cool back to temp_test -> window test @temp_test):
     localparam INIT_HOLD  = 0;   // initial delay at temp_test
     localparam RAMP_UP    = 1;   // ramp temp_test -> temp_cal
     localparam CALIBRATE  = 2;   // sweep codes at temp_cal, find best
     localparam POST_DELAY = 3;   // hold best_code at temp_cal
-    localparam TEST_ENTER = 4;   // set code 0, assert test_mode (still at temp_cal)
-    localparam TEST_HOLD0 = 5;   // hold code 0 one frame before stepping
-    localparam TEST_UP    = 6;   // walk 0 -> 7   (voltage rising)
-    localparam TEST_JUMP  = 7;   // jump to 15, hold one frame
-    localparam TEST_DN    = 8;   // walk 15 -> 8  (voltage falling)
-    localparam TEST_ZERO  = 9;   // return code to 0000, still in test mode
-    localparam TEST_EXIT  = 10;  // deassert test mode, restore best_code
-    localparam RAMP_DOWN  = 11;  // ramp temp_cal -> temp_test with best_code
-    localparam DONE       = 12;  // hold best_code at temp_test, measure final
+    localparam RAMP_DOWN  = 4;   // ramp temp_cal -> temp_test with best_code
+    localparam DONE       = 5;   // hold best_code at temp_test, measure final, settle
+    localparam TEST_ENTER = 6;   // set code 0000, assert test_mode (at temp_test)
+    localparam TEST_HOLD0 = 7;   // hold code 0 one frame before stepping
+    localparam TEST_UP    = 8;   // walk 0 -> 7   (voltage rising)
+    localparam TEST_JUMP  = 9;   // jump to 15, hold one frame
+    localparam TEST_DN    = 10;  // walk 15 -> 8  (voltage falling)
+    localparam TEST_ZERO  = 11;  // return code to 0000, still in test mode
+    localparam TEST_EXIT  = 12;  // deassert test mode, restore best_code
 
     (* desc="best trim code" *)               integer best_code;
     (* desc="monotonic normalized code" *)    integer norm_code;
@@ -75,7 +76,7 @@ module trimm_cal (vout, test_mode, bg_in);
             ramp_ticks = 21;      // fixed ramp window (covers -40..150 worst case)
 
             if (cal_en)
-                $cds_set_temperature(temp_cur);
+                $cds_set_temperature(temp_cur);   // start at test temperature
         end
 
         @(timer(start_delay, Tclk)) begin
@@ -125,13 +126,41 @@ module trimm_cal (vout, test_mode, bg_in);
                     end
 
                     POST_DELAY: begin
-                        // hold best_code at temp_cal, settle before window test
+                        // hold best_code at temp_cal so it settles before cooling down
                         post_cnt = post_cnt + 1;
-                        if (post_cnt * Tclk >= post_cal_delay)
+                        if (post_cnt * Tclk >= post_cal_delay) begin
+                            ramp_cnt = 0;
+                            state    = RAMP_DOWN;
+                        end
+                    end
+
+                    RAMP_DOWN: begin
+                        if (abs(temp_cur - temp_test) > temp_step) begin
+                            if (temp_test > temp_cur)
+                                temp_cur = temp_cur + temp_step;
+                            else
+                                temp_cur = temp_cur - temp_step;
+                            $cds_set_temperature(temp_cur);
+                        end else if (temp_cur != temp_test) begin
+                            temp_cur = temp_test;
+                            $cds_set_temperature(temp_cur);
+                        end
+                        ramp_cnt = ramp_cnt + 1;
+                        if (ramp_cnt >= ramp_ticks) begin
+                            post_cnt = 0;
+                            state    = DONE;
+                        end
+                    end
+
+                    DONE: begin
+                        // trimmed bandgap at temp_test; settle, then run window test
+                        v_final  = V(bg_in);
+                        post_cnt = post_cnt + 1;
+                        if (post_cnt * Tclk >= test_settle)
                             state = TEST_ENTER;
                     end
 
-                    // ---- window test, performed at temp_cal (still hot) ----
+                    // ---- window test, performed at temp_test ----
                     TEST_ENTER: begin
                         trim_val = 0;             // code 0000
                         tm_on    = 1;             // assert test mode (coarse LSB)
@@ -180,29 +209,6 @@ module trimm_cal (vout, test_mode, bg_in);
                     TEST_EXIT: begin
                         tm_on    = 0;             // leave test mode
                         trim_val = best_code;     // restore trimmed code
-                        ramp_cnt = 0;
-                        state    = RAMP_DOWN;
-                    end
-
-                    // ---- now cool back down to the test temperature ----
-                    RAMP_DOWN: begin
-                        if (abs(temp_cur - temp_test) > temp_step) begin
-                            if (temp_test > temp_cur)
-                                temp_cur = temp_cur + temp_step;
-                            else
-                                temp_cur = temp_cur - temp_step;
-                            $cds_set_temperature(temp_cur);
-                        end else if (temp_cur != temp_test) begin
-                            temp_cur = temp_test;
-                            $cds_set_temperature(temp_cur);
-                        end
-                        ramp_cnt = ramp_cnt + 1;
-                        if (ramp_cnt >= ramp_ticks)
-                            state = DONE;
-                    end
-
-                    DONE: begin
-                        v_final = V(bg_in);       // trimmed bandgap at temp_test
                     end
 
                 endcase
