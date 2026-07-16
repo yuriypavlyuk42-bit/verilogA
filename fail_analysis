@@ -4,11 +4,11 @@
 module fail_control (vbg, iref_fail);
 
     parameter real vdd_lvl   = 1.2;    // supply level to short to (VDD); GND = 0
-    parameter real R_on      = 10;    // series resistance when forcing (small)
-    parameter real R_off     = 1e10;    // series resistance when Hi-Z (open)
+    parameter real R_on      = 100;    // series resistance when forcing (small)
+    parameter real R_off     = 1e9;    // series resistance when Hi-Z (open)
     parameter real t_slew    = 10n;    // transition time when forcing / releasing
     parameter real t_delay   = 10u;    // initial delay before first injection
-    parameter real t_hold    = 10u;    // time to hold each fault combination
+    parameter real t_hold    = 10u;    // time to hold each combination
     parameter real t_rest    = 10u;    // Hi-Z rest time between combinations
 
     inout vbg;
@@ -18,43 +18,56 @@ module fail_control (vbg, iref_fail);
     electrical iref_fail;
 
     integer state;
-    integer combo;        // 0..3 : current fault combination index
-    integer vbg_on;       // 1 = vbg driven, 0 = Hi-Z
-    integer iref_on;      // 1 = iref_fail driven, 0 = Hi-Z
-    real    vbg_tgt;      // target level for vbg when driven (0 or vdd_lvl)
+    integer combo;        // 0..8 : current combination index (ternary: vbg*3 + iref)
+    integer vbg_st;       // 0 = Hi-Z, 1 = force 0, 2 = force VDD
+    integer iref_st;      // 0 = Hi-Z, 1 = force 0, 2 = force VDD
+    integer vbg_on;       // 1 = vbg driven
+    integer iref_on;      // 1 = iref_fail driven
+    real    vbg_tgt;      // target level for vbg when driven
     real    iref_tgt;     // target level for iref_fail when driven
-    real    g_vbg;        // 1/R applied to vbg (switches R_on <-> R_off)
-    real    g_iref;       // 1/R applied to iref_fail
+    real    g_vbg;
+    real    g_iref;
 
     // FSM states:
-    localparam WAIT_INIT = 0;   // initial Hi-Z delay before first combo
-    localparam DRIVE     = 1;   // force current combination for t_hold
-    localparam REST      = 2;   // back to Hi-Z for t_rest between combos
+    localparam WAIT_INIT = 0;   // initial Hi-Z delay
+    localparam DRIVE     = 1;   // apply current combination for t_hold
+    localparam REST      = 2;   // both Hi-Z for t_rest between combinations
     localparam DONE      = 3;   // all combinations done, stay Hi-Z
 
-    (* desc="current fault combo index" *) integer combo_dbg;
+    localparam NCOMB     = 9;   // 3 states x 3 states
+
+    (* desc="current combo index (0..8, -1=idle)" *) integer combo_dbg;
+    (* desc="vbg state 0=HiZ 1=0 2=VDD" *)  integer vbg_st_dbg;
+    (* desc="iref state 0=HiZ 1=0 2=VDD" *) integer iref_st_dbg;
 
     analog begin
         @(initial_step) begin
-            state    = WAIT_INIT;
-            combo    = 0;
-            vbg_on   = 0;
-            iref_on  = 0;
-            vbg_tgt  = 0;
-            iref_tgt = 0;
-            combo_dbg = -1;
+            state      = WAIT_INIT;
+            combo      = 0;
+            vbg_st     = 0;
+            iref_st    = 0;
+            vbg_on     = 0;
+            iref_on    = 0;
+            vbg_tgt    = 0;
+            iref_tgt   = 0;
+            combo_dbg  = -1;
+            vbg_st_dbg = 0;
+            iref_st_dbg = 0;
         end
 
         // ---- WAIT_INIT: hold Hi-Z, then start first combo ----
         @(timer(t_delay)) begin
             if (state == WAIT_INIT) begin
-                combo = 0;
-                // decode combo 0: vbg bit = LSB, iref bit = next
-                vbg_tgt  = ((combo & 1) ? vdd_lvl : 0.0);
-                iref_tgt = ((combo & 2) ? vdd_lvl : 0.0);
-                vbg_on   = 1;
-                iref_on  = 1;
-                combo_dbg = combo;
+                combo   = 0;
+                vbg_st  = combo / 3;        // 0..2
+                iref_st = combo % 3;        // 0..2
+                vbg_on   = (vbg_st  != 0);
+                iref_on  = (iref_st != 0);
+                vbg_tgt  = ((vbg_st  == 2) ? vdd_lvl : 0.0);
+                iref_tgt = ((iref_st == 2) ? vdd_lvl : 0.0);
+                combo_dbg   = combo;
+                vbg_st_dbg  = vbg_st;
+                iref_st_dbg = iref_st;
                 state    = DRIVE;
             end
         end
@@ -62,7 +75,7 @@ module fail_control (vbg, iref_fail);
         // ---- DRIVE: hold current combo for t_hold, then rest ----
         @(timer(t_delay + combo*(t_hold + t_rest) + t_hold)) begin
             if (state == DRIVE) begin
-                vbg_on  = 0;         // release to Hi-Z
+                vbg_on  = 0;                // release both to Hi-Z
                 iref_on = 0;
                 state   = REST;
             end
@@ -71,23 +84,26 @@ module fail_control (vbg, iref_fail);
         // ---- REST: Hi-Z for t_rest, then next combo (or done) ----
         @(timer(t_delay + (combo+1)*(t_hold + t_rest))) begin
             if (state == REST) begin
-                if (combo < 3) begin
-                    combo    = combo + 1;
-                    vbg_tgt  = ((combo & 1) ? vdd_lvl : 0.0);
-                    iref_tgt = ((combo & 2) ? vdd_lvl : 0.0);
-                    vbg_on   = 1;
-                    iref_on  = 1;
-                    combo_dbg = combo;
+                if (combo < NCOMB - 1) begin
+                    combo   = combo + 1;
+                    vbg_st  = combo / 3;
+                    iref_st = combo % 3;
+                    vbg_on   = (vbg_st  != 0);
+                    iref_on  = (iref_st != 0);
+                    vbg_tgt  = ((vbg_st  == 2) ? vdd_lvl : 0.0);
+                    iref_tgt = ((iref_st == 2) ? vdd_lvl : 0.0);
+                    combo_dbg   = combo;
+                    vbg_st_dbg  = vbg_st;
+                    iref_st_dbg = iref_st;
                     state    = DRIVE;
                 end else begin
-                    combo_dbg = -1;
-                    state     = DONE;
+                    combo_dbg   = -1;
+                    state       = DONE;
                 end
             end
         end
 
         // ===== switched conductance: R_on when driving, R_off (open) when Hi-Z =====
-        // transition smooths both the target level and the drive strength for clean 10ns edges
         g_vbg  = transition( (vbg_on  ? 1.0/R_on : 1.0/R_off), 0, t_slew);
         g_iref = transition( (iref_on ? 1.0/R_on : 1.0/R_off), 0, t_slew);
 
