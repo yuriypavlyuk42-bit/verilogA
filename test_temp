@@ -1,70 +1,54 @@
-// VerilogA — HIGH-SIDE metal-strip shunt (realistic) — FIXED pulse breakpoints
-
+// VerilogA — physical R + L shunt, current source drives current THROUGH the L
 `include "constants.vams"
 `include "disciplines.vams"
 
-module hs_shunt_src(outp, outn, imon);
+module hs_shunt_rl(outp, outn, imon);
 
     output outp, outn, imon;
     electrical outp, outn, imon;
+    electrical mid;                                  // node between R and L
 
-    parameter real    rsh     = 1m     from (0:inf);  // shunt [ohm] (CSI2H-2512R-1L00 = 1m/5W)
-    parameter real    tcr     = 75e-6;                // TCR [1/C], ±75 ppm/C
-    parameter real    tnom    = 27.0;                 // ref temp for TCR [C]
-    parameter real    lesl    = 0.0    from [0:inf);  // ESL [H]. 0 = clean; metal-strip ~1.5n
+    parameter real    rsh     = 1m     from (0:inf);
+    parameter real    lesl    = 1.5n   from [0:inf);
+    parameter real    vcm     = 48.0;
+    parameter real    fsw     = 500k   from (0:inf);
+    parameter real    duty    = 0.0167 from (0:1);
+    parameter real    imin    = 5.0;
+    parameter real    ipk     = 15.0;
+    parameter real    t_comm  = 1n     from (0:inf);
+    parameter real    t_delay = 0.0    from [0:inf);
+    parameter integer n_pulses= 0      from [0:inf);
 
-    parameter real    vcm     = 48.0;                 // static CM = Vin [V]
-    parameter real    vcm_ac  = 0.0;                  // rail ripple on CM [V]
-    parameter real    fcm     = 500k   from (0:inf);  // rail ripple freq [Hz]
-
-    parameter real    fsw     = 500k   from (0:inf);  // switching freq [Hz]
-    parameter real    duty    = 0.0167 from (0:1);    // HS on-fraction = Vout/Vin
-    parameter real    imin    = 5.0;                  // I at start of conduction [A]
-    parameter real    ipk     = 15.0;                 // I at end   of conduction [A]
-    parameter real    t_comm  = 2n     from (0:inf);  // commutation edge time [s]
-
-    parameter real    t_delay = 0.0    from [0:inf);  // quiet time before first pulse [s]
-    parameter integer n_pulses= 0      from [0:inf);  // number of pulses (0 = infinite)
-
-    real tper, ton, tloc, tph, ii, rt, cm;
+    real tper, ton, tloc, tph, ii;
     integer k, active;
 
     analog begin
         tper = 1.0/fsw;
         ton  = duty*tper;
-        rt   = rsh*(1.0 + tcr*($temperature - 273.15 - tnom));
-
-        // *** FIX: force a solver breakpoint at the onset of every pulse,
-        //     otherwise the coarse inter-pulse step can jump over the narrow pulse ***
-        @(timer(t_delay, tper))
-            ;
+        @(timer(t_delay, tper)) ;
 
         tloc = $abstime - t_delay;
         k    = floor(tloc/tper);
         tph  = tloc - k*tper;
         active = (tloc >= 0.0) && (n_pulses == 0 || k < n_pulses);
 
-        if (!active)
-            ii = 0.0;
-        else if (tph < t_comm)
-            ii = imin*(tph/t_comm);
-        else if (tph < t_comm + ton)
-            ii = imin + (ipk-imin)*((tph-t_comm)/ton);
-        else if (tph < 2.0*t_comm + ton)
-            ii = ipk*(1.0 - (tph-t_comm-ton)/t_comm);
-        else
-            ii = 0.0;
+        if (!active)                       ii = 0.0;
+        else if (tph < t_comm)             ii = imin*(tph/t_comm);
+        else if (tph < t_comm + ton)       ii = imin + (ipk-imin)*((tph-t_comm)/ton);
+        else if (tph < 2.0*t_comm + ton)   ii = ipk*(1.0 - (tph-t_comm-ton)/t_comm);
+        else                               ii = 0.0;
 
-        cm = vcm + vcm_ac*sin(2.0*`M_PI*fcm*$abstime);
+        // force the pulse current into node outp (from an ideal source to ground-ref cm)
+        I(outp) <+ -ii;                    // current source: ii flows INTO outp
 
-        V(outn)       <+ cm;
-        V(outp, outn) <+ ii*rt + lesl*ddt(ii);
-        V(imon)       <+ ii;
+        // series path outp -> mid -> outn carries that current:
+        V(outp, mid) <+ lesl*ddt(I(outp, mid));   // L on top
+        I(mid, outn) <+ V(mid, outn)/rsh;         // R on bottom
+        V(outn)      <+ vcm;                        // bottom at CM
 
-        if (active && tph < 2.0*t_comm + ton)
-            $bound_step(t_comm/4.0);
-        else
-            $bound_step(tper/20.0);
+        V(imon) <+ ii;
+
+        if (active && tph < 2.0*t_comm + ton) $bound_step(t_comm/4.0);
+        else                                  $bound_step(tper/20.0);
     end
-
 endmodule
