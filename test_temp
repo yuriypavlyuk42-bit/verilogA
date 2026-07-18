@@ -1,12 +1,4 @@
-// VerilogA — HIGH-SIDE metal-strip shunt (realistic)
-// rsh:  Bourns CSI2H-2512 class, 0.5-1 mOhm, Kelvin.  TCR ~±75 ppm/C.
-// lesl: metal-strip ESL 1-2 nH (type R <2nH). Default 0 = clean current signal.
-//       Enable lesl to see the L*di/dt COMMUTATION SPIKE (volts, brief) = switching
-//       noise you must blank. The current SIGNAL is the mV resistive ramp between edges.
-//
-//   V(outp,outn) = ii*rsh              (signal, mV)
-//                + lesl*d(ii)/dt       (switching spike at commutation, blank it)
-//   riding on static high CM = vcm (= Vin). imon = true current, 1 V/A.
+// VerilogA — HIGH-SIDE metal-strip shunt (realistic) — FIXED pulse breakpoints
 
 `include "constants.vams"
 `include "disciplines.vams"
@@ -16,25 +8,21 @@ module hs_shunt_src(outp, outn, imon);
     output outp, outn, imon;
     electrical outp, outn, imon;
 
-    // --- real shunt ---
-    parameter real    rsh     = 1m     from (0:inf);  // shunt [ohm]  (CSI2H-2512R-1L00 = 1m/5W)
+    parameter real    rsh     = 1m     from (0:inf);  // shunt [ohm] (CSI2H-2512R-1L00 = 1m/5W)
     parameter real    tcr     = 75e-6;                // TCR [1/C], ±75 ppm/C
     parameter real    tnom    = 27.0;                 // ref temp for TCR [C]
-    parameter real    lesl    = 0.0    from [0:inf);  // ESL [H]. 0 = clean; real metal-strip ~1.5n
+    parameter real    lesl    = 0.0    from [0:inf);  // ESL [H]. 0 = clean; metal-strip ~1.5n
 
-    // --- high-side common mode ---
     parameter real    vcm     = 48.0;                 // static CM = Vin [V]
     parameter real    vcm_ac  = 0.0;                  // rail ripple on CM [V]
     parameter real    fcm     = 500k   from (0:inf);  // rail ripple freq [Hz]
 
-    // --- HS conduction current ---
     parameter real    fsw     = 500k   from (0:inf);  // switching freq [Hz]
     parameter real    duty    = 0.0167 from (0:1);    // HS on-fraction = Vout/Vin
-    parameter real    imin    = 5.0;                  // current at start of conduction [A]
-    parameter real    ipk     = 15.0;                 // current at end   of conduction [A]
-    parameter real    t_comm  = 2n     from (0:inf);  // commutation edge time [s] (loop-limited)
+    parameter real    imin    = 5.0;                  // I at start of conduction [A]
+    parameter real    ipk     = 15.0;                 // I at end   of conduction [A]
+    parameter real    t_comm  = 2n     from (0:inf);  // commutation edge time [s]
 
-    // --- burst timing ---
     parameter real    t_delay = 0.0    from [0:inf);  // quiet time before first pulse [s]
     parameter integer n_pulses= 0      from [0:inf);  // number of pulses (0 = infinite)
 
@@ -43,22 +31,26 @@ module hs_shunt_src(outp, outn, imon);
 
     analog begin
         tper = 1.0/fsw;
-        ton  = duty*tper;                              // conduction window
-        rt   = rsh*(1.0 + tcr*($temperature - 273.15 - tnom));  // R with temperature
+        ton  = duty*tper;
+        rt   = rsh*(1.0 + tcr*($temperature - 273.15 - tnom));
+
+        // *** FIX: force a solver breakpoint at the onset of every pulse,
+        //     otherwise the coarse inter-pulse step can jump over the narrow pulse ***
+        @(timer(t_delay, tper))
+            ;
 
         tloc = $abstime - t_delay;
         k    = floor(tloc/tper);
         tph  = tloc - k*tper;
         active = (tloc >= 0.0) && (n_pulses == 0 || k < n_pulses);
 
-        // HS shunt current: 0 off-window; commutate in -> conduction ramp -> commutate out
         if (!active)
             ii = 0.0;
-        else if (tph < t_comm)                         // turn-on commutation 0 -> imin
+        else if (tph < t_comm)
             ii = imin*(tph/t_comm);
-        else if (tph < t_comm + ton)                   // conduction ramp imin -> ipk
+        else if (tph < t_comm + ton)
             ii = imin + (ipk-imin)*((tph-t_comm)/ton);
-        else if (tph < 2.0*t_comm + ton)               // turn-off commutation ipk -> 0
+        else if (tph < 2.0*t_comm + ton)
             ii = ipk*(1.0 - (tph-t_comm-ton)/t_comm);
         else
             ii = 0.0;
@@ -66,7 +58,7 @@ module hs_shunt_src(outp, outn, imon);
         cm = vcm + vcm_ac*sin(2.0*`M_PI*fcm*$abstime);
 
         V(outn)       <+ cm;
-        V(outp, outn) <+ ii*rt + lesl*ddt(ii);         // signal + (optional) ESL spike
+        V(outp, outn) <+ ii*rt + lesl*ddt(ii);
         V(imon)       <+ ii;
 
         if (active && tph < 2.0*t_comm + ton)
