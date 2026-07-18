@@ -1,37 +1,59 @@
-`include "constants.h"
-`include "discipline.h"
+// VerilogA — high-side shunt test source
+// Periodic HS conduction-current pulse across an explicit shunt, riding on a
+// high common mode. Point your CSA at (outp,outn) and try to resolve i(t)*rsh
+// out of the CM within the (short!) on-window. imon = true current, 1 V per A.
 
-module temp_ctrl ();
+`include "constants.vams"
+`include "disciplines.vams"
 
-    parameter real temp_start = 27;    // starting temperature (deg C)
-    parameter real temp_end   = 150;   // final temperature (deg C)
-    parameter real temp_step  = 10;    // ramp step (deg C); set = full delta for single jump
-    parameter real delay      = 1m;    // hold at temp_start before ramping
-    parameter real Tstep      = 1m;    // time between temperature steps (settle)
+module hs_shunt_src(outp, outn, imon);
 
-    real temp_cur;
+    output outp, outn, imon;
+    electrical outp, outn, imon;
 
-    (* desc="commanded temperature", units="C" *) real temp_dbg;
+    parameter real rsh    = 1m     from (0:inf);  // shunt value [ohm]
+    parameter real vcm    = 48.0;                 // high-side common mode [V]
+    parameter real fsw    = 500k   from (0:inf);  // switching frequency [Hz]
+    parameter real duty   = 0.0167 from (0:1);    // HS on-fraction = Vout/Vin
+    parameter real istart = 5.0;                  // I at start of conduction (Imin) [A]
+    parameter real iend   = 15.0;                 // I at end   of conduction (Ipeak)[A]
+    parameter real tr     = 1n     from (0:inf);  // current rise edge [s]
+    parameter real tf     = 1n     from (0:inf);  // current fall edge [s]
+    parameter real vcm_ac = 0.0;                  // CM ripple amplitude (CMRR probe) [V]
+    parameter real fcm    = 500k   from (0:inf);  // CM ripple frequency [Hz]
+
+    real tper, ton, tph, ii, cm;
 
     analog begin
-        @(initial_step) begin
-            temp_cur = temp_start;
-            temp_dbg = temp_cur;
-            $cds_set_temperature(temp_cur);
-        end
+        tper = 1.0/fsw;
+        ton  = duty*tper;                                // flat conduction window
+        tph  = $abstime - tper*floor($abstime/tper);     // phase within period
 
-        @(timer(delay, Tstep)) begin
-            if (abs(temp_cur - temp_end) > temp_step) begin
-                if (temp_end > temp_cur)
-                    temp_cur = temp_cur + temp_step;
-                else
-                    temp_cur = temp_cur - temp_step;
-            end else begin
-                temp_cur = temp_end;   // snap to final
-            end
-            $cds_set_temperature(temp_cur);
-            temp_dbg = temp_cur;
-        end
+        // HS current: 0 off-window -> rise -> conduction ramp -> fall
+        if (tph < tr)
+            ii = istart*(tph/tr);
+        else if (tph < tr + ton)
+            ii = istart + (iend-istart)*((tph-tr)/ton);
+        else if (tph < tr + ton + tf)
+            ii = iend*(1.0 - (tph-tr-ton)/tf);
+        else
+            ii = 0.0;
+
+        // common mode (optionally rippled to probe dynamic CMRR)
+        cm = vcm + vcm_ac*sin(2.0*`M_PI*fcm*$abstime);
+
+        // bottom of shunt sits at CM; force i(t) through rsh -> V(outp,outn)=ii*rsh
+        V(outn)       <+ cm;
+        I(outp, outn) <+ V(outp, outn)/rsh - ii;
+
+        // true-current monitor, 1 V per A
+        V(imon) <+ ii;
+
+        // keep the solver on the narrow pulse
+        if (tph < tr + ton + tf)
+            $bound_step(min(tr, tf)/2.0);
+        else
+            $bound_step(tper/20.0);
     end
 
 endmodule
