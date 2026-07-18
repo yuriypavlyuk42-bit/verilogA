@@ -1,12 +1,12 @@
-// VerilogA — HIGH-SIDE shunt test source
-// A short HS conduction-current pulse is developed across an explicit shunt that
-// sits on a STATIC high common mode (= Vin). Point your CSA at (outp,outn) and try
-// to resolve i(t)*rsh out of the CM, inside the (tiny) on-window.
+// VerilogA — HIGH-SIDE metal-strip shunt (realistic)
+// rsh:  Bourns CSI2H-2512 class, 0.5-1 mOhm, Kelvin.  TCR ~±75 ppm/C.
+// lesl: metal-strip ESL 1-2 nH (type R <2nH). Default 0 = clean current signal.
+//       Enable lesl to see the L*di/dt COMMUTATION SPIKE (volts, brief) = switching
+//       noise you must blank. The current SIGNAL is the mV resistive ramp between edges.
 //
-//   differential  =  ii*rsh  +  lesl*d(ii)/dt      <- signal + shunt-ESL edge marker (timing)
-//   common mode   =  vcm     +  lrail*d(ii)/dt  +  rail ripple   <- what the CSA must reject
-//
-// imon carries the true current, 1 V per A. Starts after t_delay, emits n_pulses (0 = infinite).
+//   V(outp,outn) = ii*rsh              (signal, mV)
+//                + lesl*d(ii)/dt       (switching spike at commutation, blank it)
+//   riding on static high CM = vcm (= Vin). imon = true current, 1 V/A.
 
 `include "constants.vams"
 `include "disciplines.vams"
@@ -16,68 +16,61 @@ module hs_shunt_src(outp, outn, imon);
     output outp, outn, imon;
     electrical outp, outn, imon;
 
-    // --- shunt ---
-    parameter real    rsh     = 1m     from (0:inf);  // shunt value [ohm]
-    parameter real    lesl    = 0.5n   from [0:inf);  // shunt parasitic ESL -> differential edge marker [H]
+    // --- real shunt ---
+    parameter real    rsh     = 1m     from (0:inf);  // shunt [ohm]  (CSI2H-2512R-1L00 = 1m/5W)
+    parameter real    tcr     = 75e-6;                // TCR [1/C], ±75 ppm/C
+    parameter real    tnom    = 27.0;                 // ref temp for TCR [C]
+    parameter real    lesl    = 0.0    from [0:inf);  // ESL [H]. 0 = clean; real metal-strip ~1.5n
 
     // --- high-side common mode ---
-    parameter real    vcm     = 48.0;                 // static high-side common mode = Vin [V]
-    parameter real    lrail   = 0.0    from [0:inf);  // rail/package ESL -> small CM glitch at edges [H] (try 1n)
-    parameter real    vcm_ac  = 0.0;                  // rail-ripple amplitude on CM [V] (0 = off)
-    parameter real    fcm     = 500k   from (0:inf);  // rail-ripple frequency [Hz]
+    parameter real    vcm     = 48.0;                 // static CM = Vin [V]
+    parameter real    vcm_ac  = 0.0;                  // rail ripple on CM [V]
+    parameter real    fcm     = 500k   from (0:inf);  // rail ripple freq [Hz]
 
-    // --- current pulse (HS conduction) ---
-    parameter real    fsw     = 500k   from (0:inf);  // switching frequency [Hz]
+    // --- HS conduction current ---
+    parameter real    fsw     = 500k   from (0:inf);  // switching freq [Hz]
     parameter real    duty    = 0.0167 from (0:1);    // HS on-fraction = Vout/Vin
-    parameter real    istart  = 5.0;                  // I at start of conduction (Imin) [A]
-    parameter real    iend    = 15.0;                 // I at end   of conduction (Ipeak)[A]
-    parameter real    tr      = 1n     from (0:inf);  // current rise edge [s]
-    parameter real    tf      = 1n     from (0:inf);  // current fall edge [s]
+    parameter real    imin    = 5.0;                  // current at start of conduction [A]
+    parameter real    ipk     = 15.0;                 // current at end   of conduction [A]
+    parameter real    t_comm  = 2n     from (0:inf);  // commutation edge time [s] (loop-limited)
 
-    // --- timing of the burst ---
+    // --- burst timing ---
     parameter real    t_delay = 0.0    from [0:inf);  // quiet time before first pulse [s]
     parameter integer n_pulses= 0      from [0:inf);  // number of pulses (0 = infinite)
 
-    real tper, ton, tloc, tph, ii, didt, cm;
+    real tper, ton, tloc, tph, ii, rt, cm;
     integer k, active;
 
     analog begin
         tper = 1.0/fsw;
-        ton  = duty*tper;                              // flat conduction window
+        ton  = duty*tper;                              // conduction window
+        rt   = rsh*(1.0 + tcr*($temperature - 273.15 - tnom));  // R with temperature
 
-        tloc = $abstime - t_delay;                     // time since generation start
-        k    = floor(tloc/tper);                       // period index (0,1,2,...)
-        tph  = tloc - k*tper;                          // phase within the period
-
+        tloc = $abstime - t_delay;
+        k    = floor(tloc/tper);
+        tph  = tloc - k*tper;
         active = (tloc >= 0.0) && (n_pulses == 0 || k < n_pulses);
 
-        // HS current: 0 off-window -> rise -> conduction ramp -> fall
+        // HS shunt current: 0 off-window; commutate in -> conduction ramp -> commutate out
         if (!active)
             ii = 0.0;
-        else if (tph < tr)
-            ii = istart*(tph/tr);
-        else if (tph < tr + ton)
-            ii = istart + (iend-istart)*((tph-tr)/ton);
-        else if (tph < tr + ton + tf)
-            ii = iend*(1.0 - (tph-tr-ton)/tf);
+        else if (tph < t_comm)                         // turn-on commutation 0 -> imin
+            ii = imin*(tph/t_comm);
+        else if (tph < t_comm + ton)                   // conduction ramp imin -> ipk
+            ii = imin + (ipk-imin)*((tph-t_comm)/ton);
+        else if (tph < 2.0*t_comm + ton)               // turn-off commutation ipk -> 0
+            ii = ipk*(1.0 - (tph-t_comm-ton)/t_comm);
         else
             ii = 0.0;
 
-        didt = ddt(ii);
+        cm = vcm + vcm_ac*sin(2.0*`M_PI*fcm*$abstime);
 
-        // common mode: static Vin + small edge glitch (rail ESL) + slow rail ripple
-        cm = vcm + lrail*didt + vcm_ac*sin(2.0*`M_PI*fcm*$abstime);
-
-        // bottom of shunt sits at CM; shunt = rsh in series with its ESL
         V(outn)       <+ cm;
-        V(outp, outn) <+ ii*rsh + lesl*didt;
+        V(outp, outn) <+ ii*rt + lesl*ddt(ii);         // signal + (optional) ESL spike
+        V(imon)       <+ ii;
 
-        // true-current monitor, 1 V per A
-        V(imon) <+ ii;
-
-        // keep the solver on the narrow pulse
-        if (active && tph < tr + ton + tf)
-            $bound_step(min(tr, tf)/2.0);
+        if (active && tph < 2.0*t_comm + ton)
+            $bound_step(t_comm/4.0);
         else
             $bound_step(tper/20.0);
     end
